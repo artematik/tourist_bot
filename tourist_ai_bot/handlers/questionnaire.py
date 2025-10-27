@@ -130,7 +130,7 @@ async def generate_and_send_route(message: Message, state: FSMContext):
     try:
         # Используем наш умный fallback
         ai_service = AIService()
-        route_data = await ai_service.generate_route(
+        route_data = ai_service.generate_route(
             interests=user_data['interests'],
             time_hours=user_data['time_hours'],
             location=user_data['location_text'],
