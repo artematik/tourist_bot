@@ -15,7 +15,9 @@ class RouteFormatter:
             message += f"\n{i}. *{point['name']}*\n"
             message += f"   📖 {point['description']}\n"
             message += f"   💡 {point['reason']}\n"
-            message += f"   ⏱ ~{point['estimated_time_min']} мин\n"
+            est_time = point.get('estimated_time_min', 30)  # 👈 безопасный доступ
+            message += f"   ⏱ ~{est_time} мин\n"
+
         
         message += f"\n🗺️ **Ваш маршрут:**\n{route_data['path_description']}\n"
         
