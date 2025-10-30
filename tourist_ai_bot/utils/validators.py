@@ -1,5 +1,21 @@
 from config import settings
 
+
+from typing import Any
+
+def is_address_like(text: str) -> bool:
+    if not isinstance(text, str):
+        return False
+    t = text.strip()
+    return len(t) >= 5 and any(c.isalpha() for c in t)
+
+def is_valid_lat_lon(lat: Any, lon: Any) -> bool:
+    try:
+        lat = float(lat); lon = float(lon)
+        return -90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0
+    except Exception:
+        return False
+
 def validate_interests(interests: str) -> bool:
     """Валидация введенных интересов"""
     return (len(interests) >= settings.MIN_INTERESTS_LENGTH and 
@@ -7,7 +23,7 @@ def validate_interests(interests: str) -> bool:
 
 def validate_time(time_text: str) -> float:
     """Валидация и преобразование времени"""
-    if time_text.endswith('+'):
+    if time_text.endswith(''):
         time_text = time_text[:-1]
     
     try:
