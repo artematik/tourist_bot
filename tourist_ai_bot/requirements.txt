@@ -1,0 +1,27 @@
+# --- Core bot framework ---
+aiogram>=3.0
+python-dotenv
+pydantic-settings
+aiohttp
+requests
+
+# --- Data handling ---
+pandas
+numpy<2
+openpyxl
+
+# --- Machine learning / NLP ---
+scikit-learn
+sentence-transformers
+torch
+transformers
+pybind11>=2.12
+
+# --- Visualization / optional analytics ---
+matplotlib
+
+# --- Optional geolocation / maps ---
+geopy
+
+# --- Misc utils ---
+tqdm
