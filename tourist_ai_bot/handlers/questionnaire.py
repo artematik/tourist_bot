@@ -1,155 +1,269 @@
+# handlers/questionnaire.py
+import asyncio
+import logging
+import time
 from aiogram import Router, F
 from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from aiogram.fsm.context import FSMContext
 
+from handlers.start import cmd_start, cmd_help
 from states import UserState
 from services.geocoder import Geocoder
-from services.ai_service import AIService
+from services.ai_service import ai_service
 from services.route_formatter import RouteFormatter
 
 router = Router()
+logger = logging.getLogger(__name__)
 
-import logging
+
+# === КЛАВИАТУРЫ ===
+def _time_kb():
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="1"), KeyboardButton(text="2")],
+                  [KeyboardButton(text="3"), KeyboardButton(text="4")]],
+        resize_keyboard=True
+    )
+
+
+def _transport_kb():
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="🚶 Пешком"), KeyboardButton(text="🚗 Авто")],
+            [KeyboardButton(text="🚲 Велосипед/самокат"), KeyboardButton(text="🚌 Общественный транспорт")],
+        ],
+        resize_keyboard=True
+    )
+
+
+def _location_kb():
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="📍 Отправить геопозицию", request_location=True)],
+        ],
+        resize_keyboard=True
+    )
+
+
+def _finish_kb():
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="🔁 Сгенерировать ещё")],
+            [KeyboardButton(text="🔄 Сбросить настройки"), KeyboardButton(text="ℹ️ Помощь")],
+        ],
+        resize_keyboard=True
+    )
+
+
+# === ОБРАБОТЧИКИ СЕРВИСНЫХ КНОПОК ===
+@router.message(F.text.in_({"🔄 Сбросить настройки", "/start", "start"}))
+async def reset_questionnaire(message: Message, state: FSMContext):
+    """Полный сброс и перезапуск анкеты (эквивалент /start)."""
+    await state.clear()
+    await cmd_start(message, state)
+
+
+@router.message(F.text.in_({"ℹ️ Помощь", "/help", "help"}))
+async def show_help(message: Message, state: FSMContext):
+    """Вывод инструкции без сброса анкеты."""
+    await cmd_help(message, state)
+
+
+# === ПОВТОРНАЯ ГЕНЕРАЦИЯ ===
+@router.message(F.text == "🔁 Сгенерировать ещё")
+async def regenerate_route(message: Message, state: FSMContext):
+    data = await state.get_data()
+    interests = data.get("interests")
+    time_hours = data.get("time_hours", 2.0)
+    transport = data.get("transport", "walk")
+
+    lat = data.get("data_last_lat") or data.get("latitude")
+    lon = data.get("data_last_lon") or data.get("longitude")
+    start_label = data.get("data_last_loc") or data.get("location_text")
+
+    if not (interests and lat is not None and lon is not None):
+        await message.answer("Не удалось восстановить данные маршрута. Начни заново — /start")
+        return
+
+    import time as _t
+    diversity_seed = int(_t.time() * 1000) % 2_000_000_000
+
+    await message.answer(
+        f"🔁 Генерирую новый маршрут по твоим интересам...\n"
+        f"📍 Старт: {start_label or 'текущая точка'}\n"
+        f"⏱ Время прогулки: {time_hours} ч\n"
+        f"🚶‍♂️ Транспорт: {transport}"
+    )
+
+    try:
+        route_data = await asyncio.wait_for(
+            ai_service.generate_route(
+                lat=lat,
+                lon=lon,
+                interests=interests,
+                time_hours=time_hours,
+                transport=transport,
+                diversity_seed=diversity_seed,
+            ),
+            timeout=60,
+        )
+        route_msg = RouteFormatter.format_route(route_data, interests, time_hours)
+        await message.answer(route_msg, parse_mode="Markdown", disable_web_page_preview=True)
+    except asyncio.TimeoutError:
+        await message.answer("Сервис точек задерживается. Попробуйте ещё раз через минуту.")
+    except Exception as e:
+        logger.exception("💥 Ошибка при повторной генерации маршрута")
+        await message.answer(f"Не удалось сгенерировать маршрут: {e}")
+
+
+# === АНКЕТА ===
+def _normalize_transport(txt: str) -> str:
+    t = (txt or "").lower()
+    if "авто" in t or "маш" in t:
+        return "car"
+    if "вел" in t or "самокат" in t:
+        return "bike"
+    if "обще" in t or "автобус" in t or "метро" in t:
+        return "transit"
+    return "walk"
+
 
 @router.message(UserState.interest, F.text)
 async def process_interests(message: Message, state: FSMContext):
     interests = message.text.strip()
-    
     if len(interests) < 3:
-        await message.answer("Пожалуйста, введите интересы текстом (минимум 3 символа). Попробуйте еще раз:")
+        await message.answer("Пожалуйста, опиши интересы (минимум 3 символа). Пример: «стрит-арт, панорамы».")
         return
-    
     await state.update_data(interests=interests)
     await state.set_state(UserState.time)
-    
-    time_keyboard = ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="1"), KeyboardButton(text="2")],
-            [KeyboardButton(text="3"), KeyboardButton(text="4")],
-        ],
-        resize_keyboard=True
-    )
-    
-    await message.answer(
-        "✅ Отлично! Запомнил твои интересы.\n\n"
-        "Вопрос 2 из 3:\nСколько часов у тебя есть на прогулку?",
-        reply_markup=time_keyboard
-    )
+    await message.answer("Вопрос 2 из 4:\nСколько часов у тебя есть на прогулку?", reply_markup=_time_kb())
+
 
 @router.message(UserState.time, F.text)
 async def process_time(message: Message, state: FSMContext):
     time_text = message.text.strip()
-    
     try:
         time_hours = float(time_text)
         if time_hours < 0.5 or time_hours > 8:
             raise ValueError
     except ValueError:
-        await message.answer("Пожалуйста, введите число от 0.5 до 8 часов:")
+        await message.answer("Пожалуйста, введи число от 0.5 до 8 часов:")
         return
-    
     await state.update_data(time_hours=time_hours)
+    await state.set_state(UserState.transport)
+    await message.answer("Вопрос 3 из 4:\nКак планируешь передвигаться?", reply_markup=_transport_kb())
+
+
+@router.message(UserState.transport, F.text)
+async def process_transport(message: Message, state: FSMContext):
+    tr = _normalize_transport(message.text)
+    await state.update_data(transport=tr)
     await state.set_state(UserState.location)
-    
-    location_keyboard = ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="📍 Отправить местоположение", request_location=True)],
-            [KeyboardButton(text="Ввести адрес вручную")],
-        ],
-        resize_keyboard=True
-    )
-    
     await message.answer(
-        "✅ Отлично! Запомнил время.\n\n"
-        "Вопрос 3 из 3:\n"
-        "Откуда начнем прогулку?\n\n"
-        "• Нажми кнопку ниже чтобы отправить геолокацию\n"
-        "• Или напиши адрес текстом (например: 'Площадь Горького' или 'ул. Большая Покровская, 1')",
-        reply_markup=location_keyboard
+        "Вопрос 4 из 4:\nОткуда начнём прогулку?\n\n"
+        "• Нажми кнопку, чтобы отправить геопозицию\n"
+        "• Или отправь адрес текстом",
+        reply_markup=_location_kb(),
     )
 
-@router.message(UserState.location, F.text)
+
+@router.message(
+    UserState.location,
+    F.text & ~F.text.in_({
+        "🔁 Сгенерировать ещё",
+        "🔄 Сбросить настройки",
+        "ℹ️ Помощь",
+        "/start", "start", "/help", "help", "🚀 Начать"
+    })
+)
 async def process_location_text(message: Message, state: FSMContext):
     location_text = message.text.strip()
-    
-    if len(location_text) < 3:
-        await message.answer("Пожалуйста, введите корректный адрес (минимум 3 символа):")
+    coords = await Geocoder.get_coordinates(location_text)
+    if not coords:
+        await message.answer("Не удалось распознать адрес. Попробуй ещё раз или отправь геопозицию.")
         return
-    
-    coordinates = await Geocoder.get_coordinates(location_text)
-    
-    if coordinates:
-        lat, lon = coordinates
-        location_display = await Geocoder.get_address_from_coords(lat, lon) or f"📍 {location_text}"
-    else:
-        lat, lon = None, None
-        location_display = f"📍 {location_text}"
-        await message.answer("⚠️ Использую текстовый адрес для построения маршрута")
-    
-    await state.update_data(
-        location_text=location_display,
-        latitude=lat,
-        longitude=lon
-    )
-    
-    await generate_and_send_route(message, state)
+    lat, lon = coords
+    display = await Geocoder.get_address_from_coords(lat, lon) or location_text
+    await state.update_data(location_text=display, latitude=lat, longitude=lon)
+    await generate_and_send_route(message, state, reuse=False)
+
 
 @router.message(UserState.location, F.location)
 async def process_location_geo(message: Message, state: FSMContext):
-    location = message.location
-    lat, lon = location.latitude, location.longitude
-    
-    location_display = await Geocoder.get_address_from_coords(lat, lon)
-    
-    await state.update_data(
-        location_text=location_display,
-        latitude=lat,
-        longitude=lon
-    )
-    
-    await generate_and_send_route(message, state)
+    lat = message.location.latitude
+    lon = message.location.longitude
+    display = await Geocoder.get_address_from_coords(lat, lon) or f"{lat:.5f}, {lon:.5f}"
+    await state.update_data(location_text=display, latitude=lat, longitude=lon)
+    await generate_and_send_route(message, state, reuse=False)
 
-async def generate_and_send_route(message: Message, state: FSMContext):
-    """Генерирует и отправляет маршрут пользователю"""
-    
-    user_data = await state.get_data()
-    
-    summary = (
-        "🎉 Отлично! Собрал все данные!\n\n"
-        "Вот что у нас получилось:\n"
-        f"• 🎯 Интересы: {user_data['interests']}\n"
-        f"• ⏱ Время: {user_data['time_hours']} часа(ов)\n"
-        f"• 📍 Старт: {user_data['location_text']}\n\n"
-        "Сейчас создам твой маршрут... 🗺️"
+
+# === ГЕНЕРАЦИЯ МАРШРУТА ===
+async def generate_and_send_route(message: Message, state: FSMContext, reuse: bool):
+    data = await state.get_data()
+
+    if reuse:
+        interests = data["data_last_interests"]
+        time_hours = data["data_last_time"]
+        transport = data["data_last_transport"]
+        lat = data["data_last_lat"]
+        lon = data["data_last_lon"]
+        start_label = data["data_last_loc"]
+    else:
+        interests = data["interests"]
+        time_hours = data["time_hours"]
+        transport = data.get("transport", "walk")
+        lat = data.get("latitude")
+        lon = data.get("longitude")
+        start_label = data.get("location_text", "")
+
+    diversity_seed = int(time.time() * 1000) % 2_000_000_000
+
+    await message.answer(
+        f"Собираю маршрут из точки: {start_label}\n"
+        f"Интересы: {interests}\n"
+        f"Транспорт: {transport}",
+        reply_markup=ReplyKeyboardRemove()
     )
-    
-    await message.answer(summary, reply_markup=ReplyKeyboardRemove())
-    
     await message.bot.send_chat_action(chat_id=message.chat.id, action="typing")
-    
+
     try:
-        # Используем наш умный fallback
-        ai_service = AIService()
-        route_data = ai_service.generate_route(
-            interests=user_data['interests'],
-            time_hours=user_data['time_hours'],
-            location=user_data['location_text'],
-            lat=user_data.get('latitude'),
-            lon=user_data.get('longitude')
+        route_data = await asyncio.wait_for(
+            ai_service.generate_route(
+                interests=interests,
+                time_hours=time_hours,
+                location=start_label,
+                lat=lat,
+                lon=lon,
+                transport=transport,
+                diversity_seed=diversity_seed,
+            ),
+            timeout=60,
         )
-        
-        # Форматируем ответ
-        route_message = RouteFormatter.format_route(
-            route_data, 
-            user_data['interests'], 
-            user_data['time_hours']
+
+        text = RouteFormatter.format_route(route_data, interests, time_hours)
+        await message.answer(
+            text,
+            parse_mode="Markdown",
+            disable_web_page_preview=True,
+            reply_markup=_finish_kb(),
         )
-        
-        await message.answer(route_message, parse_mode="Markdown")
-        
-    except Exception as e:
-        logging.error(f"Ошибка генерации маршрута: {e}")
-        error_message = RouteFormatter.format_error_message()
-        await message.answer(error_message)
-    
-    await state.clear()
+
+        await state.update_data(
+            data_last_interests=interests,
+            data_last_time=time_hours,
+            data_last_transport=transport,
+            data_last_lat=lat,
+            data_last_lon=lon,
+            data_last_loc=start_label,
+        )
+
+    except asyncio.TimeoutError:
+        await message.answer(
+            "Сервис точек задерживается. Попробуйте ещё раз через минуту.",
+            reply_markup=_finish_kb(),
+        )
+    except Exception:
+        logger.exception("Ошибка генерации маршрута")
+        await message.answer(
+            "Не получилось построить маршрут. Попробуй поменять запрос или отправить геопозицию заново.",
+            reply_markup=_finish_kb(),
+        )
