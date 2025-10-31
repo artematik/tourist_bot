@@ -19,8 +19,10 @@ logger = logging.getLogger(__name__)
 # === КЛАВИАТУРЫ ===
 def _time_kb():
     return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="1"), KeyboardButton(text="2")],
-                  [KeyboardButton(text="3"), KeyboardButton(text="4")]],
+        keyboard=[
+            [KeyboardButton(text="1"), KeyboardButton(text="2")],
+            [KeyboardButton(text="3"), KeyboardButton(text="4")]
+        ],
         resize_keyboard=True
     )
 
@@ -28,7 +30,7 @@ def _transport_kb():
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="🚶 Пешком"), KeyboardButton(text="🚗 Авто")],
-            [KeyboardButton(text="🚲 Велосипед/самокат"), KeyboardButton(text="🚌 Общественный транспорт")],
+            [KeyboardButton(text="🚲 Велосипед/самокат"), KeyboardButton(text="🚌 Общественный транспорт")]
         ],
         resize_keyboard=True
     )
@@ -36,7 +38,7 @@ def _transport_kb():
 def _location_kb():
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="📍 Отправить геопозицию", request_location=True)],
+            [KeyboardButton(text="📍 Отправить геопозицию", request_location=True)]
         ],
         resize_keyboard=True
     )
@@ -45,7 +47,7 @@ def _finish_kb():
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="🔁 Сгенерировать ещё")],
-            [KeyboardButton(text="🔄 Сбросить настройки"), KeyboardButton(text="ℹ️ Помощь")],
+            [KeyboardButton(text="🔄 Сбросить настройки"), KeyboardButton(text="ℹ️ Помощь")]
         ],
         resize_keyboard=True
     )
@@ -109,6 +111,7 @@ async def regenerate_route(message: Message, state: FSMContext):
         await message.answer(f"Не удалось сгенерировать маршрут: {e}")
 
 # === АНКЕТА ===
+
 def _normalize_transport(txt: str) -> str:
     t = (txt or "").lower()
     if "авто" in t or "маш" in t:
@@ -119,21 +122,17 @@ def _normalize_transport(txt: str) -> str:
         return "transit"
     return "walk"
 
-# --- Проверка валидности интересов ---
 def _valid_interests(text: str) -> bool:
+    """Проверка, что интерес введён корректно"""
     if not text:
         return False
     text = text.strip().lower()
-    # слишком короткая строка
     if len(text) < 3:
         return False
-    # не содержит букв
     if not re.search(r"[a-zа-я]", text):
         return False
-    # только повторяющиеся символы
     if len(set(text)) < 2:
         return False
-    # выглядит как мусор (одно короткое слово)
     if re.fullmatch(r"[a-zа-я]{1,3}", text):
         return False
     return True
@@ -142,7 +141,6 @@ def _valid_interests(text: str) -> bool:
 async def process_interests(message: Message, state: FSMContext):
     interests = message.text.strip()
 
-    # 🔍 Проверяем корректность ввода
     if not _valid_interests(interests):
         await message.answer(
             "⚠️ Пожалуйста, опиши свои интересы понятнее.\n"
@@ -157,7 +155,11 @@ async def process_interests(message: Message, state: FSMContext):
 
     await state.update_data(interests=interests)
     await state.set_state(UserState.time)
-    await message.answer("Вопрос 2 из 5:\nСколько часов у тебя есть на прогулку?", reply_markup=_time_kb())
+    await asyncio.sleep(0.3)
+    await message.answer(
+        "Вопрос 2 из 5:\nСколько часов у тебя есть на прогулку?",
+        reply_markup=_time_kb()
+    )
 
 @router.message(UserState.time, F.text)
 async def process_time(message: Message, state: FSMContext):
@@ -169,12 +171,15 @@ async def process_time(message: Message, state: FSMContext):
     except ValueError:
         await message.answer("Пожалуйста, введи число от 0.5 до 8 часов:")
         return
+
     await state.update_data(time_hours=time_hours)
     await state.set_state(UserState.start_time)
+    await asyncio.sleep(0.4)
     await message.answer(
-        "Хочешь указать время начала прогулки?\n"
+        "Вопрос 3 из 5:\nХочешь указать время начала прогулки?\n"
         "⏰ Например: 15:30 или 'сейчас'\n\n"
-        "Если не важно — просто напиши 'сейчас'."
+        "Если не важно — просто напиши 'сейчас'.",
+        reply_markup=ReplyKeyboardRemove()  # убираем клавиатуру
     )
 
 @router.message(UserState.start_time, F.text)
@@ -196,18 +201,23 @@ async def process_start_time(message: Message, state: FSMContext):
 
     await state.update_data(start_time=start_dt.isoformat())
     await state.set_state(UserState.transport)
-    await message.answer("Как планируешь передвигаться?", reply_markup=_transport_kb())
+    await asyncio.sleep(0.3)
+    await message.answer(
+        "Вопрос 4 из 5:\nКак планируешь передвигаться?",
+        reply_markup=_transport_kb()  # возвращаем клавиатуру
+    )
 
 @router.message(UserState.transport, F.text)
 async def process_transport(message: Message, state: FSMContext):
     tr = _normalize_transport(message.text)
     await state.update_data(transport=tr)
     await state.set_state(UserState.location)
+    await asyncio.sleep(0.4)
     await message.answer(
-        "Откуда начнём прогулку?\n\n"
+        "Вопрос 5 из 5:\nОткуда начнём прогулку?\n\n"
         "• Нажми кнопку, чтобы отправить геопозицию\n"
         "• Или отправь адрес текстом",
-        reply_markup=_location_kb(),
+        reply_markup=_location_kb()  # показываем клавиатуру с геолокацией
     )
 
 @router.message(
