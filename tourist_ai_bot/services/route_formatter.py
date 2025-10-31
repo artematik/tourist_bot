@@ -4,7 +4,6 @@ import math
 import datetime
 
 
-# --- Форматирование времени и длительности ---
 def _fmt_time_min(m: int) -> str:
     m = max(0, int(m))
     h = m // 60
@@ -27,7 +26,6 @@ def _fmt_hhmm(dt_str: str) -> str:
         return str(dt_str)
 
 
-# --- Сопоставление режимов транспорта ---
 def _mode_to_gmaps(transport: str) -> str:
     return {
         "walk": "walking",
@@ -48,7 +46,7 @@ def _mode_to_yamaps(transport: str) -> str:
     }.get(transport, "walking")
 
 
-# --- Ссылки на карты ---
+#Ссылки на карты
 def _map_link_point(lat: float, lon: float, provider: str = "google") -> str:
     if provider == "yandex":
         return f"https://yandex.ru/maps/?pt={lon},{lat}&z=16&l=map"
@@ -80,7 +78,7 @@ def _map_link_route(
         return f"https://yandex.ru/maps/?rtext={quote_plus(rtext)}&rtt={ym_mode}"
 
 
-# --- Доп. утилиты для оценки расстояний ---
+#Oценки расстояний
 def _haversine_km(a_lat: float, a_lon: float, b_lat: float, b_lon: float) -> float:
     R = 6371.0
     la1, lo1, la2, lo2 = map(math.radians, [a_lat, a_lon, b_lat, b_lon])
@@ -134,7 +132,6 @@ def _ensure_stops_and_summary(route: Dict[str, Any]) -> Dict[str, Any]:
                 s["eta_min"] = int(sum(p["leg_min"] + p.get("stay_min", 0) for p in stops))
         return route
 
-    # fallback-форма
     steps = route.get("steps") or []
     transport = route.get("transport", "walk")
     speed = _SPEEDS_KMH.get(transport, 4.5)
@@ -192,7 +189,6 @@ def _ensure_stops_and_summary(route: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-# --- Основной класс форматирования ---
 class RouteFormatter:
     @staticmethod
     def format_route(route: Dict[str, Any], interests: str, time_hours: float) -> str:
