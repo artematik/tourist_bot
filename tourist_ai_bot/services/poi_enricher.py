@@ -10,7 +10,6 @@ from config import settings
 
 logger = logging.getLogger(__name__)
 
-# ---------------- Heuristics: address-like and generic names ----------------
 
 _ADDR_WORDS_RU = [
     "ул.", "улица", "пр-т", "проспект", "пл.", "площадь", "пер.", "переулок",
@@ -73,7 +72,6 @@ def _needs_enrich(name: Optional[str], desc: Optional[str]) -> bool:
         return True
     return False
 
-# ---------------- Local fallback templates (varied) ----------------
 
 _FALLBACK_TEMPLATES = {
     "cafe": [
@@ -127,7 +125,6 @@ def _fallback_description(name: str, interests: str) -> str:
     idx = abs(hash(name)) % len(templates)
     return templates[idx].format(name=name or "Локация")
 
-# ---------------- Ionet client + robust JSON extraction ----------------
 
 class PoiEnricher:
     def __init__(self) -> None:
@@ -145,7 +142,7 @@ class PoiEnricher:
         # in-memory cache
         self._cache: Dict[Tuple[str, float, float, str, str], str] = {}
 
-        # ограничим за вызов (меньше шанс словить 429)
+        # ограничение за вызов (меньше шанс словить 429)
         self.max_enrich_per_call: int = int(getattr(settings, "POI_ENRICH_MAX", 4))
 
     def _cache_key(self, name: str, lat: float, lon: float, locale: str, interests: str) -> Tuple[str, float, float, str, str]:
@@ -199,7 +196,7 @@ class PoiEnricher:
             "Content-Type": "application/json",
         }
         retry_delay = 0.6
-        for turn in range(2):  # два круга по пулу моделей
+        for turn in range(2): 
             for model in self.model_candidates:
                 payload = {
                     "model": model,
@@ -213,7 +210,6 @@ class PoiEnricher:
                 if parsed:
                     return parsed
                 if retryable:
-                    # бэкофф с джиттером
                     await asyncio.sleep(retry_delay + random.random() * 0.4)
             retry_delay *= 1.7
         return None
@@ -293,7 +289,6 @@ class PoiEnricher:
 
         parsed = await self._call_llm_with_backoff(system_prompt, user_payload)
 
-        # если не получилось (квота/ошибка) — разнообразный локальный фолбэк
         if not parsed or not isinstance(parsed, dict) or not isinstance(parsed.get("descriptions"), list):
             for i, s in batch:
                 desc = _fallback_description(s.get("name") or "Локация", interests)
