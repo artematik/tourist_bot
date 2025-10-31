@@ -1,8 +1,8 @@
-# services/ai_service.py
 import asyncio
 import logging
 import math
 import random
+import datetime
 from typing import Dict, Any, Optional, List, Tuple
 
 from services.ionet_route_service import IonetRouteService
@@ -50,37 +50,29 @@ def _looks_generic_name(name: str) -> bool:
         return True
     if n in {"nizhny novgorod", "нижний новгород"}:
         return True
-    # частые generic: просто "Russia" / "Nizhny Novgorod, Russia"
     if ", russia" in n or "нижегородская область" in n:
         return True
     return False
 
 
 def _filter_generic_pois(pois: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """
-    Убираем явные generic-POI (узлы с именем 'Nizhny Novgorod, Russia' и т.п.),
-    чтобы маршрут не включал абстрактные "районы".
-    """
     cleaned = []
     for p in pois:
         name = (p.get("name") or p.get("title") or p.get("label") or "").strip()
         if _looks_generic_name(name):
             continue
         cleaned.append(p)
-    # если всё выкинули — вернём исходное, чтобы не оголить маршрут
     return cleaned or pois
 
 
 def _pick_pois_with_seed(pois: List[Dict[str, Any]], seed: int, max_stops: int) -> List[Dict[str, Any]]:
-    """Детерминированно перемешиваем и берём верхушку."""
     rnd = random.Random(seed)
-    shuffled = pois[:]  # не мутируем оригинал
+    shuffled = pois[:]
     rnd.shuffle(shuffled)
     return shuffled[:max_stops]
 
 
 def _nn_order(start: Tuple[float, float], pts: List[Tuple[float, float]]) -> List[Tuple[float, float]]:
-    """Простой жадный NN-порядок обхода точек от старта."""
     if not pts:
         return []
     unvisited = pts[:]
@@ -102,22 +94,17 @@ def _build_stops_and_summary(
     transport: str,
     picked_pois: List[Dict[str, Any]],
     target_minutes: int,
+    start_time: Optional[datetime.datetime] = None,  # новое поле
 ) -> Dict[str, Any]:
     """
-    Собираем итоговую структуру:
-    - stops[]: name, description, lat, lon, leg_min, stay_min
-    - summary: transport, start_lat/lon/label, total_km, eta_min ~= target_minutes
+    Формирует итоговую структуру маршрута со временем начала и конца.
     """
     speed = _SPEEDS_KMH.get(transport, 4.5)
     start_xy = (start_lat, start_lon)
-
-    pts_xy: List[Tuple[float, float]] = []
-    for p in picked_pois:
-        if "lat" in p and "lon" in p:
-            pts_xy.append((float(p["lat"]), float(p["lon"])))
+    pts_xy: List[Tuple[float, float]] = [
+        (float(p["lat"]), float(p["lon"])) for p in picked_pois if "lat" in p and "lon" in p
+    ]
     ordered_xy = _nn_order(start_xy, pts_xy)
-
-    # индекс для вытягивания названий/описаний по координатам
     by_xy = {(float(p["lat"]), float(p["lon"])): p for p in picked_pois if "lat" in p and "lon" in p}
 
     stops: List[Dict[str, Any]] = []
@@ -140,14 +127,13 @@ def _build_stops_and_summary(
                 "lat": xy[0],
                 "lon": xy[1],
                 "leg_min": leg_min,
-                "stay_min": 0,  # заполним ниже
+                "stay_min": 0,
             }
         )
         prev = xy
 
-    # Базовые стоянки и довыравнивание под целевое время
     planned = max(1, int(target_minutes))
-    base_stay = 10  # базовые минуты на каждой точке
+    base_stay = 10
     base_total = base_stay * len(stops)
     eta_now = travel_min + base_total
     extra = max(0, planned - eta_now)
@@ -159,6 +145,10 @@ def _build_stops_and_summary(
 
     eta_final = travel_min + sum(s["stay_min"] for s in stops)
 
+    # Вычисляем время начала и конца
+    start_dt = start_time or datetime.datetime.now()
+    end_dt = start_dt + datetime.timedelta(minutes=eta_final)
+
     summary = {
         "transport": transport,
         "start_lat": start_lat,
@@ -166,6 +156,8 @@ def _build_stops_and_summary(
         "start_label": start_label or "Старт",
         "total_km": round(total_km, 1),
         "eta_min": int(eta_final),
+        "start_time": start_dt.isoformat(),
+        "end_time": end_dt.isoformat(),
     }
     return {"stops": stops, "summary": summary}
 
@@ -184,14 +176,15 @@ class AIService:
         transport: str,
         location: Optional[str] = None,
         diversity_seed: Optional[int] = None,
+        start_time: Optional[datetime.datetime] = None,  # новое поле
     ) -> Optional[Dict[str, Any]]:
 
         tmode = _norm_transport(transport)
         total_minutes = int(time_hours * 60)
 
         logger.info(
-            f"🧭 Генерация маршрута через Ionet API: {interests}, {time_hours:.1f}ч, "
-            f"{tmode}, старт={location or 'геопозиция'}"
+            f"🧭 Генерация маршрута: {interests}, {time_hours:.1f}ч, {tmode}, "
+            f"старт={location or 'геопозиция'}"
         )
 
         # Радиус под скорость
@@ -200,16 +193,13 @@ class AIService:
         search_radius_m = int(max(800, min(max_distance_km * 1000, 15000)))
         logger.info(f"🔍 Радиус поиска POI: {search_radius_m} м (скорость={speed_kmh} км/ч)")
 
-        # 1) POI из провайдера
         try:
             pois = fetch_pois_nearby(lat, lon, interests, search_radius_m)
         except Exception as e:
-            logger.warning(f"⚠️ Overpass не ответил или вернул ошибку: {e}")
+            logger.warning(f"⚠️ Overpass не ответил: {e}")
             pois = []
 
         if not pois:
-            # Вернём простую прогулку по месту старта, чтобы форматтер не падал
-            logger.warning("⚠️ Overpass не вернул ни одной точки, используем один центр как fallback.")
             result = {
                 "stops": [
                     {
@@ -218,7 +208,7 @@ class AIService:
                         "lat": lat,
                         "lon": lon,
                         "leg_min": 0,
-                        "stay_min": max(1, total_minutes - 0),
+                        "stay_min": total_minutes,
                     }
                 ],
                 "summary": {
@@ -228,21 +218,17 @@ class AIService:
                     "start_label": location or "Старт",
                     "total_km": 0.0,
                     "eta_min": total_minutes,
+                    "start_time": (start_time or datetime.datetime.now()).isoformat(),
+                    "end_time": (start_time or datetime.datetime.now() + datetime.timedelta(minutes=total_minutes)).isoformat(),
                 },
                 "meta": {"source": "fallback", "reason": "No POI"},
             }
-            logger.info("✅ Маршрут готов (источник: %s)", result.get("meta", {}).get("source"))
             return result
 
-        # 1.1) выкинем generic-POI (город/страна)
         pois = _filter_generic_pois(pois)
-
-        # 2) Детерминированно выбираем подмножество POI по seed → новые маршруты при "Сгенерировать ещё"
         seed = (diversity_seed or 0) ^ (hash(interests) & 0x7FFFFFFF)
-        max_stops = max(3, min(12, 2 + int(time_hours * 2)))  # 2 точки на час, но минимум 3 и не >12
+        max_stops = max(3, min(12, 2 + int(time_hours * 2)))
         picked = _pick_pois_with_seed(pois, seed=seed, max_stops=max_stops)
-
-        # 3) Пытаемся через Ionet. Он может вернуть steps без времени — рассчитаем.
         start = {"lat": lat, "lon": lon, "name": location or "Стартовая точка"}
 
         ionet_result: Optional[Dict[str, Any]] = None
@@ -250,7 +236,7 @@ class AIService:
             ionet_result = await asyncio.wait_for(
                 self.ionet_service.optimize_route(
                     start=start,
-                    pois=picked,  # важный момент: передаём уже "перетасованные" точки
+                    pois=picked,
                     time_budget_min=total_minutes,
                     transport=tmode,
                     interests=interests,
@@ -258,23 +244,20 @@ class AIService:
                 timeout=90,
             )
         except asyncio.TimeoutError:
-            logger.error("⏱️ Ionet API превысил время ожидания (timeout).")
+            logger.error("⏱️ Ionet API timeout.")
         except Exception as e:
             logger.exception(f"❌ Ошибка Ionet API: {e}")
 
-        # 4) Если Ionet дал годный ответ со steps — конвертируем steps → stops и выравниваем время
         if ionet_result and isinstance(ionet_result, dict) and ionet_result.get("steps"):
             steps = ionet_result.get("steps", [])
-            # Приведём к виду picked для унификации (подтянем name/description из picked по координатам)
             by_xy = {(float(p["lat"]), float(p["lon"])): p for p in picked if "lat" in p and "lon" in p}
             enriched_steps: List[Dict[str, Any]] = []
             for i, s in enumerate(steps, 1):
                 lat_s = float(s.get("lat"))
                 lon_s = float(s.get("lon"))
                 base = by_xy.get((lat_s, lon_s), {})
-                name = s.get("name") or base.get("name") or base.get("title") or f"Точка {i}"
-                desc = s.get("description") or base.get("description") or base.get("addr") or ""
-                # выбрасываем generic-названия прямо тут
+                name = s.get("name") or base.get("name") or f"Точка {i}"
+                desc = s.get("description") or base.get("description") or ""
                 if _looks_generic_name(name):
                     continue
                 enriched_steps.append(
@@ -283,11 +266,8 @@ class AIService:
                         "description": desc,
                         "lat": lat_s,
                         "lon": lon_s,
-                        "leg_min": 0,   # рассчитаем ниже
-                        "stay_min": 0,  # распределим ниже
                     }
                 )
-
             result = _build_stops_and_summary(
                 start_label=location or "Старт",
                 start_lat=lat,
@@ -295,10 +275,10 @@ class AIService:
                 transport=tmode,
                 picked_pois=enriched_steps,
                 target_minutes=total_minutes,
+                start_time=start_time,
             )
             result.setdefault("meta", {})["source"] = "ionet"
         else:
-            # 5) Fallback: полностью локально строим маршрут (NN) из picked и выравниваем время под запрос
             result = _build_stops_and_summary(
                 start_label=location or "Старт",
                 start_lat=lat,
@@ -306,11 +286,11 @@ class AIService:
                 transport=tmode,
                 picked_pois=picked,
                 target_minutes=total_minutes,
+                start_time=start_time,
             )
             result.setdefault("meta", {})["source"] = "fallback"
             result["meta"]["reason"] = "Ionet empty/400/429"
 
-        # ── Обогащаем descriptions там, где они «пустые»; кэш защитит от 429 на ре-генерациях
         try:
             result["stops"] = await self.poi_enricher.enrich_stops(
                 result.get("stops", []),
