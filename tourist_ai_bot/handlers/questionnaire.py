@@ -1,7 +1,8 @@
-# handlers/questionnaire.py
+import re
 import asyncio
 import logging
 import time
+import datetime
 from aiogram import Router, F
 from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from aiogram.fsm.context import FSMContext
@@ -15,7 +16,6 @@ from services.route_formatter import RouteFormatter
 router = Router()
 logger = logging.getLogger(__name__)
 
-
 # === КЛАВИАТУРЫ ===
 def _time_kb():
     return ReplyKeyboardMarkup(
@@ -23,7 +23,6 @@ def _time_kb():
                   [KeyboardButton(text="3"), KeyboardButton(text="4")]],
         resize_keyboard=True
     )
-
 
 def _transport_kb():
     return ReplyKeyboardMarkup(
@@ -34,7 +33,6 @@ def _transport_kb():
         resize_keyboard=True
     )
 
-
 def _location_kb():
     return ReplyKeyboardMarkup(
         keyboard=[
@@ -42,7 +40,6 @@ def _location_kb():
         ],
         resize_keyboard=True
     )
-
 
 def _finish_kb():
     return ReplyKeyboardMarkup(
@@ -53,20 +50,15 @@ def _finish_kb():
         resize_keyboard=True
     )
 
-
-# === ОБРАБОТЧИКИ СЕРВИСНЫХ КНОПОК ===
+# === СЕРВИСНЫЕ КНОПКИ ===
 @router.message(F.text.in_({"🔄 Сбросить настройки", "/start", "start"}))
 async def reset_questionnaire(message: Message, state: FSMContext):
-    """Полный сброс и перезапуск анкеты (эквивалент /start)."""
     await state.clear()
     await cmd_start(message, state)
 
-
 @router.message(F.text.in_({"ℹ️ Помощь", "/help", "help"}))
 async def show_help(message: Message, state: FSMContext):
-    """Вывод инструкции без сброса анкеты."""
     await cmd_help(message, state)
-
 
 # === ПОВТОРНАЯ ГЕНЕРАЦИЯ ===
 @router.message(F.text == "🔁 Сгенерировать ещё")
@@ -75,6 +67,7 @@ async def regenerate_route(message: Message, state: FSMContext):
     interests = data.get("interests")
     time_hours = data.get("time_hours", 2.0)
     transport = data.get("transport", "walk")
+    start_time = data.get("start_time")
 
     lat = data.get("data_last_lat") or data.get("latitude")
     lon = data.get("data_last_lon") or data.get("longitude")
@@ -103,6 +96,7 @@ async def regenerate_route(message: Message, state: FSMContext):
                 time_hours=time_hours,
                 transport=transport,
                 diversity_seed=diversity_seed,
+                start_time=datetime.datetime.fromisoformat(start_time) if start_time else None
             ),
             timeout=60,
         )
@@ -113,7 +107,6 @@ async def regenerate_route(message: Message, state: FSMContext):
     except Exception as e:
         logger.exception("💥 Ошибка при повторной генерации маршрута")
         await message.answer(f"Не удалось сгенерировать маршрут: {e}")
-
 
 # === АНКЕТА ===
 def _normalize_transport(txt: str) -> str:
@@ -126,17 +119,45 @@ def _normalize_transport(txt: str) -> str:
         return "transit"
     return "walk"
 
+# --- Проверка валидности интересов ---
+def _valid_interests(text: str) -> bool:
+    if not text:
+        return False
+    text = text.strip().lower()
+    # слишком короткая строка
+    if len(text) < 3:
+        return False
+    # не содержит букв
+    if not re.search(r"[a-zа-я]", text):
+        return False
+    # только повторяющиеся символы
+    if len(set(text)) < 2:
+        return False
+    # выглядит как мусор (одно короткое слово)
+    if re.fullmatch(r"[a-zа-я]{1,3}", text):
+        return False
+    return True
 
 @router.message(UserState.interest, F.text)
 async def process_interests(message: Message, state: FSMContext):
     interests = message.text.strip()
-    if len(interests) < 3:
-        await message.answer("Пожалуйста, опиши интересы (минимум 3 символа). Пример: «стрит-арт, панорамы».")
+
+    # 🔍 Проверяем корректность ввода
+    if not _valid_interests(interests):
+        await message.answer(
+            "⚠️ Пожалуйста, опиши свои интересы понятнее.\n"
+            "Например:\n"
+            "• музеи и архитектура\n"
+            "• прогулки по паркам\n"
+            "• кофе и уютные места\n\n"
+            "Попробуй ещё раз 👇"
+        )
+        await state.set_state(UserState.interest)
         return
+
     await state.update_data(interests=interests)
     await state.set_state(UserState.time)
-    await message.answer("Вопрос 2 из 4:\nСколько часов у тебя есть на прогулку?", reply_markup=_time_kb())
-
+    await message.answer("Вопрос 2 из 5:\nСколько часов у тебя есть на прогулку?", reply_markup=_time_kb())
 
 @router.message(UserState.time, F.text)
 async def process_time(message: Message, state: FSMContext):
@@ -149,9 +170,33 @@ async def process_time(message: Message, state: FSMContext):
         await message.answer("Пожалуйста, введи число от 0.5 до 8 часов:")
         return
     await state.update_data(time_hours=time_hours)
-    await state.set_state(UserState.transport)
-    await message.answer("Вопрос 3 из 4:\nКак планируешь передвигаться?", reply_markup=_transport_kb())
+    await state.set_state(UserState.start_time)
+    await message.answer(
+        "Хочешь указать время начала прогулки?\n"
+        "⏰ Например: 15:30 или 'сейчас'\n\n"
+        "Если не важно — просто напиши 'сейчас'."
+    )
 
+@router.message(UserState.start_time, F.text)
+async def process_start_time(message: Message, state: FSMContext):
+    text = message.text.strip().lower()
+    now = datetime.datetime.now()
+
+    if text in {"сейчас", "now"}:
+        start_dt = now
+    else:
+        try:
+            parsed = datetime.datetime.strptime(text, "%H:%M").time()
+            start_dt = now.replace(hour=parsed.hour, minute=parsed.minute, second=0, microsecond=0)
+            if start_dt < now:
+                start_dt += datetime.timedelta(days=1)
+        except ValueError:
+            await message.answer("Введи время в формате ЧЧ:ММ (например, 16:30) или 'сейчас'.")
+            return
+
+    await state.update_data(start_time=start_dt.isoformat())
+    await state.set_state(UserState.transport)
+    await message.answer("Как планируешь передвигаться?", reply_markup=_transport_kb())
 
 @router.message(UserState.transport, F.text)
 async def process_transport(message: Message, state: FSMContext):
@@ -159,19 +204,16 @@ async def process_transport(message: Message, state: FSMContext):
     await state.update_data(transport=tr)
     await state.set_state(UserState.location)
     await message.answer(
-        "Вопрос 4 из 4:\nОткуда начнём прогулку?\n\n"
+        "Откуда начнём прогулку?\n\n"
         "• Нажми кнопку, чтобы отправить геопозицию\n"
         "• Или отправь адрес текстом",
         reply_markup=_location_kb(),
     )
 
-
 @router.message(
     UserState.location,
     F.text & ~F.text.in_({
-        "🔁 Сгенерировать ещё",
-        "🔄 Сбросить настройки",
-        "ℹ️ Помощь",
+        "🔁 Сгенерировать ещё", "🔄 Сбросить настройки", "ℹ️ Помощь",
         "/start", "start", "/help", "help", "🚀 Начать"
     })
 )
@@ -186,7 +228,6 @@ async def process_location_text(message: Message, state: FSMContext):
     await state.update_data(location_text=display, latitude=lat, longitude=lon)
     await generate_and_send_route(message, state, reuse=False)
 
-
 @router.message(UserState.location, F.location)
 async def process_location_geo(message: Message, state: FSMContext):
     lat = message.location.latitude
@@ -195,27 +236,20 @@ async def process_location_geo(message: Message, state: FSMContext):
     await state.update_data(location_text=display, latitude=lat, longitude=lon)
     await generate_and_send_route(message, state, reuse=False)
 
-
 # === ГЕНЕРАЦИЯ МАРШРУТА ===
 async def generate_and_send_route(message: Message, state: FSMContext, reuse: bool):
     data = await state.get_data()
 
-    if reuse:
-        interests = data["data_last_interests"]
-        time_hours = data["data_last_time"]
-        transport = data["data_last_transport"]
-        lat = data["data_last_lat"]
-        lon = data["data_last_lon"]
-        start_label = data["data_last_loc"]
-    else:
-        interests = data["interests"]
-        time_hours = data["time_hours"]
-        transport = data.get("transport", "walk")
-        lat = data.get("latitude")
-        lon = data.get("longitude")
-        start_label = data.get("location_text", "")
+    interests = data["interests"]
+    time_hours = data["time_hours"]
+    start_time_str = data.get("start_time")
+    transport = data.get("transport", "walk")
+    lat = data.get("latitude")
+    lon = data.get("longitude")
+    start_label = data.get("location_text", "")
 
     diversity_seed = int(time.time() * 1000) % 2_000_000_000
+    start_dt = datetime.datetime.fromisoformat(start_time_str) if start_time_str else datetime.datetime.now()
 
     await message.answer(
         f"Собираю маршрут из точки: {start_label}\n"
@@ -234,6 +268,7 @@ async def generate_and_send_route(message: Message, state: FSMContext, reuse: bo
                 lat=lat,
                 lon=lon,
                 transport=transport,
+                start_time=start_dt,
                 diversity_seed=diversity_seed,
             ),
             timeout=60,
