@@ -80,7 +80,6 @@ def _forward_sync(query: str) -> Optional[Tuple[float, float, str]]:
     except Exception as e:
         logger.warning("Nominatim forward error: %s", e)
 
-    # Фолбэк: прямой JSON-вызов Nominatim
     try:
         params = {
             "q": query,
@@ -126,8 +125,7 @@ def _reverse_sync(lat: float, lon: float) -> Optional[str]:
             return _short_display(getattr(loc, "raw", {}).get("address", {}))
     except Exception as e:
         logger.warning("Nominatim reverse error: %s", e)
-
-    # Фолбэк: JSON
+        
     try:
         params = {
             "lat": lat,
