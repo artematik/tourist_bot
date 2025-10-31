@@ -46,10 +46,8 @@ class IonetRouteService:
 
         api_key = settings.IONET_API_KEY
         base_url = "https://api.intelligence.io.solutions/api/v1"
-        # модель теперь читаем из настроек; дефолт — из списка поддержанных (см. тело 400)
         model_name = getattr(settings, "IONET_MODEL", None) or "mistralai/Mistral-Large-Instruct-2411"
 
-        # --- Попытка через Ionet
         try:
             payload = {
                 "model": model_name,
@@ -109,12 +107,11 @@ class IonetRouteService:
             else:
                 route_json = {}
 
-            # Минимальная нормализация
             distance_km = float(route_json.get("distance_km") or 0.0)
             duration_min = float(route_json.get("duration_min") or 0.0)
             steps = route_json.get("steps") or []
 
-            # Если модель не посчитала — подстрахуемся
+
             if (distance_km <= 0 or duration_min <= 0) and steps:
                 coords: List[Tuple[float, float]] = []
                 if "lat" in start and "lon" in start:
@@ -142,7 +139,6 @@ class IonetRouteService:
 
         except Exception as e:
             logger.error("❌ Ошибка при обращении к Ionet API: %s", e, exc_info=True)
-            # Переходим к fallback ниже
 
         # --- Fallback: простой маршрут NN + оценка времени
         try:
