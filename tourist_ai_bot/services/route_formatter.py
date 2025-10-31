@@ -1,15 +1,33 @@
-# services/route_formatter.py
 from typing import Dict, Any, List
 from urllib.parse import quote_plus
 import math
+import datetime
 
+
+# --- Форматирование времени и длительности ---
 def _fmt_time_min(m: int) -> str:
     m = max(0, int(m))
-    h = m // 60; mm = m % 60
-    if h and mm: return f"{h} ч {mm} мин"
-    if h: return f"{h} ч"
+    h = m // 60
+    mm = m % 60
+    if h and mm:
+        return f"{h} ч {mm} мин"
+    if h:
+        return f"{h} ч"
     return f"{mm} мин"
 
+
+def _fmt_hhmm(dt_str: str) -> str:
+    """Безопасное форматирование ISO-даты в 'HH:MM'."""
+    if not dt_str:
+        return "—"
+    try:
+        dt = datetime.datetime.fromisoformat(dt_str)
+        return dt.strftime("%H:%M")
+    except Exception:
+        return str(dt_str)
+
+
+# --- Сопоставление режимов транспорта ---
 def _mode_to_gmaps(transport: str) -> str:
     return {
         "walk": "walking",
@@ -18,6 +36,7 @@ def _mode_to_gmaps(transport: str) -> str:
         "car": "driving",
         "transit": "transit",
     }.get(transport, "walking")
+
 
 def _mode_to_yamaps(transport: str) -> str:
     return {
@@ -28,16 +47,20 @@ def _mode_to_yamaps(transport: str) -> str:
         "transit": "masstransit",
     }.get(transport, "walking")
 
+
+# --- Ссылки на карты ---
 def _map_link_point(lat: float, lon: float, provider: str = "google") -> str:
     if provider == "yandex":
         return f"https://yandex.ru/maps/?pt={lon},{lat}&z=16&l=map"
     return f"https://www.google.com/maps?q={lat},{lon}"
 
+
 def _map_link_route(
-    start_lat: float, start_lon: float,
+    start_lat: float,
+    start_lon: float,
     stops: List[Dict[str, Any]],
     provider: str = "google",
-    mode: str = "walking"
+    mode: str = "walking",
 ) -> str:
     if not stops:
         return ""
@@ -56,15 +79,16 @@ def _map_link_route(
         ym_mode = mode
         return f"https://yandex.ru/maps/?rtext={quote_plus(rtext)}&rtt={ym_mode}"
 
-# --- Доп. утилиты для оценки времени/дистанции ---
+
+# --- Доп. утилиты для оценки расстояний ---
 def _haversine_km(a_lat: float, a_lon: float, b_lat: float, b_lon: float) -> float:
     R = 6371.0
-    import math as _m
-    la1, lo1, la2, lo2 = map(_m.radians, [a_lat, a_lon, b_lat, b_lon])
+    la1, lo1, la2, lo2 = map(math.radians, [a_lat, a_lon, b_lat, b_lon])
     dlat = la2 - la1
     dlon = lo2 - lo1
-    h = _m.sin(dlat/2)**2 + _m.cos(la1)*_m.cos(la2)*_m.sin(dlon/2)**2
-    return 2 * R * _m.asin(_m.sqrt(h))
+    h = math.sin(dlat / 2) ** 2 + math.cos(la1) * math.cos(la2) * math.sin(dlon / 2) ** 2
+    return 2 * R * math.asin(math.sqrt(h))
+
 
 _SPEEDS_KMH = {
     "walk": 4.5,
@@ -74,25 +98,18 @@ _SPEEDS_KMH = {
     "transit": 20.0,
 }
 
+
 def _ensure_stops_and_summary(route: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Нормализует структуру под формат:
-      route = {
-        "stops": [{"name","lat","lon","description","leg_min","stay_min"}, ...],
-        "summary": {"transport","start_lat","start_lon","start_label","total_km","eta_min"}
-      }
-    Если пришёл fallback-формат {"steps":[{lat,lon}], "distance_km", "duration_min", "transport"}, аккуратно достроим.
+    Нормализует структуру маршрута под стандартный формат.
     """
     if "stops" in route and "summary" in route:
-        # уже нормализовано — но подстрахуем eta/leg, если нули
         s = route["summary"]
         transport = s.get("transport", "walk")
         speed = _SPEEDS_KMH.get(transport, 4.5)
         stops = route["stops"]
 
-        # если нет leg_min — оценим ходки между соседями
         if stops:
-            # восстановим старт по первому пункту, если пусто
             s.setdefault("start_lat", stops[0].get("lat"))
             s.setdefault("start_lon", stops[0].get("lon"))
             s.setdefault("start_label", s.get("start_label") or "Старт")
@@ -106,11 +123,10 @@ def _ensure_stops_and_summary(route: Dict[str, Any]) -> Dict[str, Any]:
                     total_km += dist
                     p["leg_min"] = int(round(dist / speed * 60))
                 else:
-                    # если leg есть — оценим дистанцию для total_km как минимум
                     dist = _haversine_km(prev[0], prev[1], p["lat"], p["lon"])
                     total_km += dist
                 if p.get("stay_min") is None:
-                    p["stay_min"] = 10  # дефолтная остановка 10 мин
+                    p["stay_min"] = 10
                 prev = (p["lat"], p["lon"])
 
             s["total_km"] = round(s.get("total_km") or total_km, 1)
@@ -118,12 +134,11 @@ def _ensure_stops_and_summary(route: Dict[str, Any]) -> Dict[str, Any]:
                 s["eta_min"] = int(sum(p["leg_min"] + p.get("stay_min", 0) for p in stops))
         return route
 
-    # fallback-форма → строим stops и summary
+    # fallback-форма
     steps = route.get("steps") or []
     transport = route.get("transport", "walk")
     speed = _SPEEDS_KMH.get(transport, 4.5)
 
-    # старт — по первому шагу если не задан
     if steps:
         start_lat = route.get("start_lat", steps[0]["lat"])
         start_lon = route.get("start_lon", steps[0]["lon"])
@@ -131,7 +146,6 @@ def _ensure_stops_and_summary(route: Dict[str, Any]) -> Dict[str, Any]:
         start_lat = route.get("start_lat")
         start_lon = route.get("start_lon")
 
-    # превратим steps в stops (имена/описания если нет — placeholder)
     stops: List[Dict[str, Any]] = []
     prev = (start_lat, start_lon) if start_lat is not None and start_lon is not None else None
     total_km = 0.0
@@ -172,19 +186,21 @@ def _ensure_stops_and_summary(route: Dict[str, Any]) -> Dict[str, Any]:
             "start_label": route.get("start_label") or "Старт",
             "total_km": round(route.get("distance_km") or total_km, 1),
             "eta_min": max(1, int(eta_min)),
+            "start_time": route.get("start_time"),
+            "end_time": route.get("end_time"),
         },
     }
 
+
+# --- Основной класс форматирования ---
 class RouteFormatter:
     @staticmethod
     def format_route(route: Dict[str, Any], interests: str, time_hours: float) -> str:
-        # Нормализуем вход и гарантируем заполнение времени/дистанции
         route = _ensure_stops_and_summary(route)
-
         stops = route.get("stops", [])
         s = route.get("summary", {})
         if not stops:
-            return "Пока не удалось собрать точки рядом. Попробуй уточнить интересы или поменять район."
+            return "⚠️ Не удалось собрать точки. Попробуйте уточнить интересы или поменять район."
 
         transport = s.get("transport", "walk")
         g_mode = _mode_to_gmaps(transport)
@@ -193,10 +209,18 @@ class RouteFormatter:
         start_lat = s.get("start_lat", stops[0]["lat"])
         start_lon = s.get("start_lon", stops[0]["lon"])
 
+        # форматирование времени маршрута
+        start_time = _fmt_hhmm(s.get("start_time"))
+        end_time = _fmt_hhmm(s.get("end_time"))
+        eta_min = s.get("eta_min", int(time_hours * 60))
+
+        time_text = f"🕒 Время: {start_time} — {end_time} ({_fmt_time_min(eta_min)})"
+
         title = (
-            f"🎯 Персональный маршрут на {_fmt_time_min(int(time_hours*60))}\n"
+            f"🎯 Персональный маршрут на {_fmt_time_min(int(time_hours * 60))}\n"
             f"Тема: {interests.strip()}\n\n"
-            f"Старт: {start_label}\n\n"
+            f"Старт: {start_label}\n"
+            f"{time_text}\n\n"
             f"📍 Основные точки:\n"
         )
 
@@ -204,7 +228,7 @@ class RouteFormatter:
         for i, p in enumerate(stops, 1):
             name = p.get("name", f"Точка {i}")
             desc = p.get("description") or ""
-            leg = f"⏱ ~{_fmt_time_min(p.get('leg_min',0))} (+{_fmt_time_min(p.get('stay_min',0))} на месте)"
+            leg = f"⏱ ~{_fmt_time_min(p.get('leg_min', 0))} (+{_fmt_time_min(p.get('stay_min', 0))} на месте)"
             g = _map_link_point(p["lat"], p["lon"], "google")
             y = _map_link_point(p["lat"], p["lon"], "yandex")
             lines.append(
@@ -215,10 +239,10 @@ class RouteFormatter:
             )
 
         total_km = s.get("total_km", 0.0)
-        eta_min = s.get("eta_min", 0)
         lines.append(f"\n🧭 Длина ~ {total_km} км · Время ~ {_fmt_time_min(eta_min)}\n")
 
         g_route = _map_link_route(start_lat, start_lon, stops, provider="google", mode=g_mode)
         y_route = _map_link_route(start_lat, start_lon, stops, provider="yandex", mode=y_mode)
         lines.append(f"🗺️ Маршрут целиком: [Google]({g_route}) · [Яндекс]({y_route})")
+
         return "\n".join(lines)
