@@ -1,5 +1,3 @@
-# services/places_provider.py
-# services/places_provider.py
 import requests
 import logging
 import time
@@ -10,7 +8,7 @@ logger = logging.getLogger(__name__)
 
 BASE_URL = "https://api.geoapify.com/v2/places"
 
-# Ключевые категории для сопоставления интересов
+#Категории для сопоставления интересов
 CATEGORY_MAP = {
     "музей": "entertainment.museum",
     "музеи": "entertainment.museum",
