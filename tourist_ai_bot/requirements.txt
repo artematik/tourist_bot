@@ -1,5 +1,27 @@
-aiogram==3.10.0
-pydantic-settings==2.1.0
-python-dotenv==1.0.0
-openai==1.12.0
-aiohttp==3.9.1
+# --- Core bot framework ---
+aiogram>=3.0
+python-dotenv
+pydantic-settings
+aiohttp
+requests
+
+# --- Data handling ---
+pandas
+numpy<2
+openpyxl
+
+# --- Machine learning / NLP ---
+scikit-learn
+sentence-transformers
+torch
+transformers
+pybind11>=2.12
+
+# --- Visualization / optional analytics ---
+matplotlib
+
+# --- Optional geolocation / maps ---
+geopy
+
+# --- Misc utils ---
+tqdm
